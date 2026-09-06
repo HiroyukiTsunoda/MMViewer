@@ -1,0 +1,6 @@
+#ifndef MMVIEWER_RESOURCE_H
+#define MMVIEWER_RESOURCE_H
+
+#define IDI_MMVIEWER 101
+
+#endif
