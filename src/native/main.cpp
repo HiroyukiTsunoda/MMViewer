@@ -1580,6 +1580,11 @@ public:
     }
     if(m==WM_LBUTTONDOWN||m==WM_LBUTTONDBLCLK){
       TVHITTESTINFO hit{};hit.pt={GET_X_LPARAM(l),GET_Y_LPARAM(l)};auto item=TreeView_HitTest(h,&hit);
+      if(item&&(hit.flags&TVHT_ONITEMRIGHT)){
+        auto*node=a->NodeOf(item);
+        // Use the normal selection notification to open files from the row's trailing space.
+        if(node&&!node->directory){SetFocus(h);TreeView_SelectItem(h,item);return 0;}
+      }
       if(item&&(hit.flags&(TVHT_ONITEMICON|TVHT_ONITEMLABEL))){
         TVITEMW info{};info.mask=TVIF_PARAM;info.hItem=item;TreeView_GetItem(h,&info);auto*node=reinterpret_cast<mm::FolderNode*>(info.lParam);
         if(node&&node->directory){
