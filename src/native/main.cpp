@@ -29,6 +29,7 @@
 #include <string_view>
 #include "core.h"
 #include "startup.h"
+#include "single_instance.h"
 #include "folder_icons.h"
 #include "viewer.h"
 #include "resource.h"
@@ -38,7 +39,7 @@ constexpr wchar_t WindowClass[] = L"MMViewer.Native.Main.v1";
 constexpr UINT LoadDone = WM_APP + 1, TreeDone = WM_APP + 2, WatchDone = WM_APP + 3, StartupDone = WM_APP + 4;
 constexpr UINT_PTR RootDragTimer = 0x4d4d;
 enum { UiOpenFile=101, OpenFolder, NewTab, CloseTab, Sidebar, Theme, Source, Wide, Find, Reload,
-       ZoomIn, ZoomOut, ZoomReset, Reopen, SearchNext, SearchPrev, SearchClose, CollapseAll, ExpandAll, About, RemoveFromList };
+       ZoomIn, ZoomOut, ZoomReset, Reopen, SearchNext, SearchPrev, SearchClose, CollapseAll, ExpandAll, About, RemoveFromList, CloseAllTabs };
 struct FolderPathLess {
  bool operator()(const std::wstring& left,const std::wstring& right) const {return _wcsicmp(left.c_str(),right.c_str())<0;}
 };
@@ -675,12 +676,30 @@ public:
  void AddEmpty(){Capture();Tab t;t.id=nextId++;t.font=fontDefault;tabs.push_back(t);active=int(tabs.size())-1;RebuildTabs();LoadActive();Dirty();}
  void Close(int index){if(index<0||index>=int(tabs.size()))return;Capture();const bool wasActive=index==active;if(!tabs[index].path.empty()){closed.push_back(tabs[index]);if(closed.size()>10)closed.erase(closed.begin());}
     ForgetDocument(tabs[index].id);tabs.erase(tabs.begin()+index);if(active>index)active--;else if(active>=int(tabs.size()))active=int(tabs.size())-1;RebuildTabs();if(wasActive)LoadActive(false);SetupWatches();Dirty();}
- void OpenPaths(const std::vector<std::wstring>&paths){
+ void CloseAll(){
+    if(tabs.empty())return;Capture();
+    auto remember=[&](int index){if(index>=0&&index<int(tabs.size())&&!tabs[index].path.empty()){
+      closed.push_back(tabs[index]);if(closed.size()>10)closed.erase(closed.begin());}};
+    // Keep the same bounded reopen history; the active document reopens first.
+    for(int i=int(tabs.size())-1;i>=0;--i)if(i!=active)remember(i);remember(active);
+    tabs.clear();active=-1;tabDrag=-1;documentCache.clear();documentCacheBytes=0;
+    pendingAnchor.clear();pendingAnchorPath.clear();RebuildTabs();
+    const bool updating=treeUpdating;treeUpdating=true;TreeView_SelectItem(treeH,nullptr);treeUpdating=updating;
+    // Cancel any in-flight read and update the UI/watches only once.
+    LoadActive(false);notice.clear();SetupWatches();Dirty();InvalidateRect(hwnd,nullptr,FALSE);
+ }
+ void ShowTabMenu(POINT point){
+    HMENU menu=CreatePopupMenu();if(!menu)return;
+    AppendMenuW(menu,MF_STRING|(tabs.empty()?MF_GRAYED:MF_ENABLED),CloseAllTabs,L"全て閉じる");
+    const int command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,hwnd,nullptr);
+    DestroyMenu(menu);if(command==CloseAllTabs&&!closing)Command(command);
+ }
+ void OpenPaths(const std::vector<std::wstring>&paths,bool revealInSidebar=false){
     std::map<std::wstring,int,FolderPathLess> indices;
     for(size_t i=0;i<tabs.size();i++)if(!tabs[i].path.empty())indices.emplace(tabs[i].path,int(i));
     bool selected=false,changed=false;
     for(auto p:paths){std::error_code ec;if(fs::is_directory(p,ec)){OpenRoot(p);continue;}if(!mm::IsMarkdown(p)){notice=L".md / .markdown ファイルを選択してください";continue;}
-      p=mm::NormalizePath(p);if(!selected)Capture();selected=true;
+      p=mm::NormalizePath(p);if(revealInSidebar)EnsureFileFolder(p);if(!selected)Capture();selected=true;
       auto found=indices.find(p);if(found!=indices.end()){active=found->second;continue;}
       Tab t;t.path=p;t.id=nextId++;t.font=fontDefault;t.autoRefresh=!IsExcluded(p);
       if(active>=0&&tabs[active].path.empty())tabs[active]=std::move(t);else{tabs.push_back(std::move(t));active=int(tabs.size())-1;}
@@ -689,7 +708,7 @@ public:
     // A multi-file drop needs one tab-strip rebuild and only the final document
     // read. Intermediate selections must not create and immediately cancel I/O.
     if(changed)RebuildTabs();else if(selected){TabCtrl_SetCurSel(tabsH,active);InvalidateRect(tabsH,nullptr,FALSE);}
-    if(selected)LoadActive();SetupWatches();Dirty();
+    if(selected){LoadActive();if(revealInSidebar){if(!sidebar){sidebar=true;Layout();}SelectTreeFile(true);}}SetupWatches();Dirty();
  }
  void SelectFiles(){IFileOpenDialog* dialog=nullptr;if(FAILED(CoCreateInstance(CLSID_FileOpenDialog,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&dialog))))return;
     DWORD options;dialog->GetOptions(&options);dialog->SetOptions(options|FOS_ALLOWMULTISELECT|FOS_FILEMUSTEXIST|FOS_FORCEFILESYSTEM);COMDLG_FILTERSPEC filter[]={ {L"Markdown",L"*.md;*.markdown"},{L"すべてのファイル",L"*.*"} };dialog->SetFileTypes(2,filter);
@@ -802,6 +821,20 @@ public:
  std::wstring pendingAnchor,pendingAnchorPath;
  void Link(const std::wstring&target){auto s=mm::Utf8(target);if(s.rfind("https://",0)==0||s.rfind("http://",0)==0){ShellExecuteW(hwnd,L"open",target.c_str(),nullptr,nullptr,SW_SHOWNORMAL);return;}if(active<0)return;
     if(!s.empty()&&s[0]=='#'){view.ScrollToAnchor(mm::Wide(mm::Fragment(s)));return;}auto path=mm::ResolveReference(tabs[active].path,s);if(!path.empty()&&mm::IsMarkdown(path)){pendingAnchor=mm::Wide(mm::Fragment(s));pendingAnchorPath=path;OpenPaths({path});}else{notice=L"このリンク形式は開けません";InvalidateRect(hwnd,nullptr,FALSE);}}
+ void EnsureFileFolder(const std::wstring& path){
+    const auto parent=fs::path(path).parent_path().wstring();
+    if(parent.empty())return;
+    // Reuse a registered ancestor, including while its asynchronous scan is
+    // pending. A missing row must not create a duplicate nested registration.
+    FolderRegistration* owner=nullptr;
+    for(const auto& folder:folders)if(IsWithinFolder(parent,folder->path)
+      &&(!owner||folder->path.size()>owner->path.size()))owner=folder.get();
+    if(!owner||IsExcluded(path)){OpenRoot(parent);return;}
+    // The file may have been created since the last scan, before its watch
+    // notification arrives. Scan completion selects the current active tab.
+    if(!rowsByPath.contains(path)&&!owner->scanning&&!owner->queuedTasks)
+      watchRescanFolders.insert(owner->path);
+ }
  void OpenRoot(const std::wstring&path){
     const auto normalized=mm::NormalizePath(path);auto*folder=FindFolder(normalized);const bool addedRoot=!folder;
     if(!folder){auto added=std::make_unique<FolderRegistration>();added->path=normalized;added->id=nextFolderId++;
@@ -1309,10 +1342,11 @@ public:
  }
  void ShowTreeMenu(POINT point){ShowTreeMenu(point,FolderAt(point));}
  void WalkItems(HTREEITEM item,const std::function<void(HTREEITEM,mm::FolderNode*)>&fn){for(;item;item=TreeView_GetNextSibling(treeH,item)){TVITEMW info{};info.hItem=item;info.mask=TVIF_PARAM;TreeView_GetItem(treeH,&info);fn(item,reinterpret_cast<mm::FolderNode*>(info.lParam));WalkItems(TreeView_GetChild(treeH,item),fn);}}
- void SelectTreeFile(){
+ void SelectTreeFile(bool ensureVisible=false){
     if(active<0)return;auto matches=[&](const mm::FolderNode* node){return node&&!node->directory&&_wcsicmp(node->path.c_str(),tabs[active].path.c_str())==0;};
     TVITEMW selected{};selected.hItem=TreeView_GetSelection(treeH);selected.mask=TVIF_PARAM;
-    if(selected.hItem&&TreeView_GetItem(treeH,&selected)&&matches(reinterpret_cast<mm::FolderNode*>(selected.lParam)))return;
+    if(selected.hItem&&TreeView_GetItem(treeH,&selected)&&matches(reinterpret_cast<mm::FolderNode*>(selected.lParam))){
+      if(ensureVisible){const bool updating=treeUpdating;treeUpdating=true;TreeView_EnsureVisible(treeH,selected.hItem);treeUpdating=updating;}return;}
     HTREEITEM match=nullptr;
     if(auto found=rowsByPath.find(tabs[active].path);found!=rowsByPath.end()&&matches(NodeOf(found->second)))match=found->second;
     // Paths outside every root have no row. Anything else still walks the
@@ -1503,7 +1537,7 @@ public:
  }
  void Zoom(int delta){int font=active>=0?tabs[active].font:fontDefault;font=delta==999?16:std::clamp(font+delta,10,40);if(active>=0)tabs[active].font=font;fontDefault=font;view.SetFontSize(font);Dirty();InvalidateRect(hwnd,nullptr,FALSE);}
  void DoSearch(int direction){int n=GetWindowTextLengthW(searchH);std::wstring q(n+1,L'\0');GetWindowTextW(searchH,q.data(),n+1);q.resize(n);view.Search(q,direction);auto[current,total]=view.SearchResult();SetWindowTextW(countH,(std::to_wstring(current)+L" / "+std::to_wstring(total)).c_str());}
- void Command(int id){switch(id){case UiOpenFile:SelectFiles();break;case OpenFolder:SelectFolder();break;case NewTab:AddEmpty();break;case CloseTab:Close(active);break;case Sidebar:sidebar=!sidebar;Layout();Dirty();break;
+ void Command(int id){switch(id){case UiOpenFile:SelectFiles();break;case OpenFolder:SelectFolder();break;case NewTab:AddEmpty();break;case CloseTab:Close(active);break;case CloseAllTabs:CloseAll();break;case Sidebar:sidebar=!sidebar;Layout();Dirty();break;
     case Theme:dark=!dark;ApplyTheme();break;case Source:if(active>=0){tabs[active].source=!tabs[active].source;view.SetSourceMode(tabs[active].source);Dirty();}break;
     case Wide:wide=!wide;view.SetWide(wide);Dirty();break;case Find:searching=true;Layout();SetFocus(searchH);SendMessageW(searchH,EM_SETSEL,0,-1);break;
     case SearchNext:DoSearch(1);break;case SearchPrev:DoSearch(-1);break;case SearchClose:searching=false;SetWindowTextW(searchH,L"");DoSearch(0);Layout();SetFocus(view.Handle());break;
@@ -1598,6 +1632,19 @@ public:
     return DefSubclassProc(h,m,w,l);
  }
  static LRESULT CALLBACK TabProc(HWND h,UINT m,WPARAM w,LPARAM l,UINT_PTR,DWORD_PTR data){auto*a=reinterpret_cast<App*>(data);POINT p{GET_X_LPARAM(l),GET_Y_LPARAM(l)};TCHITTESTINFO hit{p,0};
+    if(m==WM_RBUTTONDOWN){a->tabDrag=-1;return 0;}
+    if(m==WM_RBUTTONUP||m==WM_CONTEXTMENU){
+      a->tabDrag=-1;POINT screen=p;
+      if(m==WM_CONTEXTMENU&&p.x==-1&&p.y==-1){
+        RECT row{};if(a->active<0||!TabCtrl_GetItemRect(h,a->active,&row))return 0;
+        screen={row.left+2,row.bottom};ClientToScreen(h,&screen);
+      }else{
+        if(m==WM_CONTEXTMENU){ScreenToClient(h,&p);hit.pt=p;}
+        if(TabCtrl_HitTest(h,&hit)<0)return 0;
+        if(m==WM_RBUTTONUP)ClientToScreen(h,&screen);
+      }
+      a->ShowTabMenu(screen);return 0;
+    }
     if(m==WM_MOUSEWHEEL){MSG msg{};msg.hwnd=h;msg.message=m;msg.wParam=w;msg.lParam=l;if(a->TabWheel(msg))return 0;}
     if(m==WM_ERASEBKGND)return 1;
     if(m==WM_PAINT||m==WM_PRINTCLIENT){PAINTSTRUCT paint{};HDC dc=m==WM_PRINTCLIENT?HDC(w):BeginPaint(h,&paint);RECT client;GetClientRect(h,&client);FillRect(dc,&client,a->panel);const int count=TabCtrl_GetItemCount(h);for(int i=0;i<count;i++){DRAWITEMSTRUCT item{};item.CtlType=ODT_TAB;item.itemID=i;item.hDC=dc;item.hwndItem=h;if(!TabCtrl_GetItemRect(h,i,&item.rcItem)||item.rcItem.right<=client.left||item.rcItem.left>=client.right)continue;a->DrawItem(&item);}if(m==WM_PAINT)EndPaint(h,&paint);return 0;}
@@ -1661,8 +1708,8 @@ public:
     case WatchDone:AcceptWatches(std::unique_ptr<Watched>(reinterpret_cast<Watched*>(l)));return 0;
     case StartupDone:AcceptStartupCheck(std::unique_ptr<StartupChecked>(reinterpret_cast<StartupChecked*>(l)));return 0;
     case WM_DROPFILES:{HDROP drop=HDROP(w);UINT n=DragQueryFileW(drop,0xffffffff,nullptr,0);std::vector<std::wstring>paths;for(UINT i=0;i<n;i++){UINT len=DragQueryFileW(drop,i,nullptr,0);std::wstring path(len+1,L'\0');DragQueryFileW(drop,i,path.data(),len+1);path.resize(len);paths.push_back(path);}DragFinish(drop);OpenPaths(paths);return 0;}
-    case WM_COPYDATA:{auto*c=reinterpret_cast<COPYDATASTRUCT*>(l);if(c->dwData!=0x4d4d||c->cbData>1024*1024||c->cbData%2||!c->lpData)return FALSE;const wchar_t*p=static_cast<const wchar_t*>(c->lpData);size_t n=c->cbData/2;std::vector<std::wstring>paths;size_t start=0;for(size_t i=0;i<n;i++)if(p[i]==0){if(i>start)paths.emplace_back(p+start,i-start);start=i+1;}OpenPaths(paths);ShowWindow(hwnd,IsIconic(hwnd)?SW_RESTORE:SW_SHOW);SetForegroundWindow(hwnd);return TRUE;}
-    case WM_CLOSE:if(!ConfirmClose())return 0;closing=true;SetPropW(hwnd,L"MMViewer.Closing",HANDLE(1));KillTimer(hwnd,TreeTaskTimer);treeTasks.clear();CancelStartupCheck();if(startupThread.joinable())startupThread.join();CancelFolderScans();if(readCancel)*readCancel=true;CancelWatchSetup();RetireWatches(std::move(watches));readWorker.Stop();for(auto& worker:scanners)worker.Stop();watchWorker.Stop();{MSG msg;while(PeekMessageW(&msg,hwnd,LoadDone,StartupDone,PM_REMOVE)){if(msg.message==LoadDone)delete reinterpret_cast<Loaded*>(msg.lParam);else if(msg.message==TreeDone)delete reinterpret_cast<Scanned*>(msg.lParam);else if(msg.message==WatchDone)delete reinterpret_cast<Watched*>(msg.lParam);else delete reinterpret_cast<StartupChecked*>(msg.lParam);}}
+    case WM_COPYDATA:{if(closing)return FALSE;auto*c=reinterpret_cast<COPYDATASTRUCT*>(l);if(!c||c->dwData!=0x4d4d||c->cbData>1024*1024||c->cbData%2||!c->lpData)return FALSE;const wchar_t*p=static_cast<const wchar_t*>(c->lpData);size_t n=c->cbData/2;std::vector<std::wstring>paths;size_t start=0;for(size_t i=0;i<n;i++)if(p[i]==0){if(i>start)paths.emplace_back(p+start,i-start);start=i+1;}OpenPaths(paths,true);ShowWindow(hwnd,IsIconic(hwnd)?SW_RESTORE:SW_SHOW);SetForegroundWindow(hwnd);return TRUE;}
+    case WM_CLOSE:if(!ConfirmClose())return 0;closing=true;RemovePropW(hwnd,mm::InstanceReadyProperty);SetPropW(hwnd,mm::InstanceClosingProperty,HANDLE(1));KillTimer(hwnd,TreeTaskTimer);treeTasks.clear();CancelStartupCheck();if(startupThread.joinable())startupThread.join();CancelFolderScans();if(readCancel)*readCancel=true;CancelWatchSetup();RetireWatches(std::move(watches));readWorker.Stop();for(auto& worker:scanners)worker.Stop();watchWorker.Stop();{MSG msg;while(PeekMessageW(&msg,hwnd,LoadDone,StartupDone,PM_REMOVE)){if(msg.message==LoadDone)delete reinterpret_cast<Loaded*>(msg.lParam);else if(msg.message==TreeDone)delete reinterpret_cast<Scanned*>(msg.lParam);else if(msg.message==WatchDone)delete reinterpret_cast<Watched*>(msg.lParam);else delete reinterpret_cast<StartupChecked*>(msg.lParam);}}
       // The product hides the window and lets process exit reclaim it: destroying
       // thousands of tree rows one by one would keep a closed window alive for
       // seconds. Tests destroy the window so their process can continue.
@@ -1675,13 +1722,20 @@ public:
 };
 
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show){
- SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);Gdiplus::GdiplusStartupInput input;ULONG_PTR token=0;const bool gdiplusStarted=Gdiplus::GdiplusStartup(&token,&input,nullptr)==Gdiplus::Ok;
+ SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
  int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);std::vector<std::wstring>paths;for(int i=1;i<argc;i++)paths.push_back(argv[i]);LocalFree(argv);
- // A window that is shutting down (hidden, marked MMViewer.Closing) is not a running instance.
- HWND existing=nullptr;for(HWND candidate=FindWindowExW(nullptr,nullptr,WindowClass,nullptr);candidate;candidate=FindWindowExW(nullptr,candidate,WindowClass,nullptr))if(!GetPropW(candidate,L"MMViewer.Closing")){existing=candidate;break;}
- if(existing){std::wstring payload;for(auto&p:paths){payload+=mm::NormalizePath(p);payload+=L'\0';}payload+=L'\0';COPYDATASTRUCT data{0x4d4d,DWORD(payload.size()*sizeof(wchar_t)),payload.data()};DWORD_PTR response;SendMessageTimeoutW(existing,WM_COPYDATA,0,LPARAM(&data),SMTO_ABORTIFHUNG,2000,&response);ShowWindow(existing,SW_RESTORE);SetForegroundWindow(existing);if(gdiplusStarted)Gdiplus::GdiplusShutdown(token);CoUninitialize();return 0;}
+ std::wstring payload;for(const auto&path:paths){payload+=mm::NormalizePath(path);payload+=L'\0';}payload+=L'\0';
+ mm::SingleInstance singleInstance;
+ const auto launch=singleInstance.Route(WindowClass,payload);
+ if(launch==mm::InstanceLaunch::Forwarded)return 0;
+ if(launch==mm::InstanceLaunch::Failed){MessageBoxW(nullptr,L"MMViewerの起動準備またはファイルの受け渡しを確認できませんでした。\n起動済みのMMViewerの状態を確認して、もう一度開いてください。",L"MMViewer",MB_OK|MB_ICONERROR);return 1;}
+ CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);Gdiplus::GdiplusStartupInput input;ULONG_PTR token=0;const bool gdiplusStarted=Gdiplus::GdiplusStartup(&token,&input,nullptr)==Gdiplus::Ok;
  INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_TREEVIEW_CLASSES|ICC_TAB_CLASSES|ICC_STANDARD_CLASSES};InitCommonControlsEx(&controls);
  int exitCode=0;{App app;app.fastExit=true;try{app.Restore();}catch(...){ }WNDCLASSEXW wc{sizeof(wc)};wc.lpfnWndProc=App::Proc;wc.hInstance=instance;wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(IDI_MMVIEWER));if(!wc.hIcon)wc.hIcon=LoadIconW(nullptr,IDI_APPLICATION);wc.lpszClassName=WindowClass;RegisterClassExW(&wc);
- auto h=CreateWindowExW(WS_EX_ACCEPTFILES,WindowClass,L"MMViewer",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,MulDiv(app.winW,GetDpiForSystem(),96),MulDiv(app.winH,GetDpiForSystem(),96),nullptr,nullptr,instance,&app);if(h){ShowWindow(h,show);UpdateWindow(h);app.LoadActive(false);app.SetupWatches(true);if(!paths.empty())app.OpenPaths(paths);app.StartStartupCheck();MSG msg;while(GetMessageW(&msg,nullptr,0,0)>0){if(app.TabWheel(msg)||app.Key(msg))continue;TranslateMessage(&msg);DispatchMessageW(&msg);}exitCode=int(msg.wParam);}else exitCode=1;}
+ auto h=CreateWindowExW(WS_EX_ACCEPTFILES,WindowClass,L"MMViewer",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,MulDiv(app.winW,GetDpiForSystem(),96),MulDiv(app.winH,GetDpiForSystem(),96),nullptr,nullptr,instance,&app);
+ if(h){ShowWindow(h,show);UpdateWindow(h);app.LoadActive(false);app.SetupWatches(true);if(!paths.empty())app.OpenPaths(paths,true);app.StartStartupCheck();
+   if(!SetPropW(h,mm::InstanceReadyProperty,HANDLE(1))){MessageBoxW(h,L"MMViewerの起動状態を登録できませんでした。",L"MMViewer",MB_OK|MB_ICONERROR);DestroyWindow(h);exitCode=1;}
+   else{MSG msg{};BOOL received;while((received=GetMessageW(&msg,nullptr,0,0))>0){if(app.TabWheel(msg)||app.Key(msg))continue;TranslateMessage(&msg);DispatchMessageW(&msg);}exitCode=received<0?1:int(msg.wParam);}
+ }else exitCode=1;}
  if(gdiplusStarted)Gdiplus::GdiplusShutdown(token);CoUninitialize();return exitCode;
 }

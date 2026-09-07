@@ -479,6 +479,128 @@ void SidebarSplitter(App& app, const fs::path& root) {
     std::cout << "PASS native sidebar splitter drag target, geometry, width limits, persistence, capture cancellation\n";
 }
 
+void CommandLineFileSidebar(const fs::path& artifacts) {
+    const auto fixture = artifacts / L"command-line-sidebar";
+    const auto root = fixture / L"日本語 フォルダ";
+    const auto first = root / L"first.md";
+    const auto nested = root / L"nested" / L"deep" / L"last.MD";
+    const auto outside = fixture / L"日本語 フォルダ-other" / L"outside.md";
+    Write(first, "# First\n");Write(nested, "# Nested\n");Write(outside, "# Outside\n");
+    for (int i = 0; i < 80; ++i) Write(root / (L"item-" + std::to_wstring(i) + L".md"), "# Item\n");
+    Host host(fixture / L"session.ini");
+    auto& app = host.app;
+    app.sidebar = false;app.Layout();
+    // This flag is shared by startup arguments and WM_COPYDATA, without
+    // showing or activating the hidden host window during the test.
+    app.OpenPaths({first.wstring(), nested.wstring()}, true);
+    Check(app.sidebar && app.folders.size() == 1 && app.FindFolder(mm::NormalizePath(root.wstring())),
+        "Command-line open did not add the parent or duplicated a pending ancestor");
+    LoadedPath(app, nested);
+    const auto selected = [&](const fs::path& path) {
+        const auto row = TreeItem(app, path);
+        return row && TreeView_GetSelection(app.treeH) == row && !app.TreeTasksPending();
+    };
+    Until([&] { return selected(nested); }, "Async folder scan did not select the requested file");
+    for (auto row = TreeView_GetParent(app.treeH, TreeItem(app, nested)); row; row = TreeView_GetParent(app.treeH, row))
+        Check((TreeView_GetItemState(app.treeH, row, TVIS_EXPANDED) & TVIS_EXPANDED) != 0,
+            "Requested file's ancestor remained collapsed");
+
+    const auto last = root / L"zz-last.md";
+    Write(last, "# Last\n");
+    app.OpenPaths({last.wstring()}, true);
+    LoadedPath(app, last);
+    Until([&] { return selected(last); }, "New file in an existing root did not appear and become selected");
+    TreeView_SelectSetFirstVisible(app.treeH, TreeItem(app, root));
+    Check(TreeView_GetSelection(app.treeH) == TreeItem(app, last), "Scrolling unexpectedly changed selection");
+    const auto tabCount = app.tabs.size();
+    app.OpenPaths({last.wstring()}, true);
+    RECT row{}, client{};
+    Check(TreeView_GetItemRect(app.treeH, TreeItem(app, last), &row, FALSE)
+        && GetClientRect(app.treeH, &client) && row.top >= client.top && row.bottom <= client.bottom,
+        "Reopening an already selected file did not scroll it into view");
+    Check(app.folders.size() == 1 && app.tabs.size() == tabCount,
+        "Reopening a file duplicated its folder or tab");
+
+    // A later request must win even if an earlier folder scan finishes later.
+    app.OpenPaths({outside.wstring()}, true);
+    app.OpenPaths({nested.wstring()}, true);
+    LoadedPath(app, nested);
+    Until([&] { return TreeItem(app, outside) && selected(nested); },
+        "A late folder scan selected the earlier request instead of the active file");
+    Check(app.folders.size() == 2, "A sibling sharing the root prefix was treated as a descendant");
+    Check(app.Save(), "Cannot save folders added through command-line open");
+    App restored;restored.ini = app.ini;restored.RestoreFolders();
+    Check(restored.FolderPaths() == app.FolderPaths(), "Automatically added folders were not persisted");
+    Check(!IsWindowVisible(app.hwnd), "Command-line sidebar test unexpectedly showed its host");
+    std::cout << "PASS command-line parent registration, async selection, ancestor reuse, repeat reveal, persistence\n";
+}
+
+void TabCloseAllChecks(const fs::path& artifacts) {
+    const auto fixture = artifacts / L"tab-close-all";
+    const auto root = fixture / L"documents";
+    std::vector<std::wstring> paths;
+    for (int i = 0; i < 12; ++i) {
+        const auto path = root / (std::to_wstring(i) + L".md");
+        Write(path, LongDocument("Close all"));paths.push_back(path.wstring());
+    }
+    Host host(fixture / L"session.ini");auto& app = host.app;
+    app.OpenRoot(root.wstring());app.OpenPaths(paths);LoadedPath(app, paths.back());
+    Until([&] { return TreeItem(app, paths.back()) && !app.TreeTasksPending(); }, "Close-all tree did not load");
+    app.Switch(2);LoadedPath(app, paths[2]);LayoutDocument(app);app.view.SetScrollRatio(0.42);
+    const auto folders = app.FolderPaths();
+    const auto originalTab = app.tabs[app.active].id;
+    struct MenuProbe {
+        int count = 0;bool correct = false;
+        static LRESULT CALLBACK Proc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
+            auto& probe = *reinterpret_cast<MenuProbe*>(data);
+            if (message == WM_INITMENUPOPUP) {
+                ++probe.count;auto menu = HMENU(w);wchar_t text[64]{};
+                GetMenuStringW(menu, CloseAllTabs, text, 64, MF_BYCOMMAND);
+                const auto state = GetMenuState(menu, CloseAllTabs, MF_BYCOMMAND);
+                probe.correct = std::wstring(text) == L"全て閉じる" && state != UINT(-1) && !(state & (MF_DISABLED | MF_GRAYED));
+                PostMessageW(window, WM_CANCELMODE, 0, 0);
+            } else if (message == WM_ENTERIDLE) PostMessageW(window, WM_CANCELMODE, 0, 0);
+            else if (message == WM_CANCELMODE) EndMenu();
+            return DefSubclassProc(window, message, w, l);
+        }
+    } probe;
+    constexpr UINT_PTR probeId = 0x434c4f53;
+    Check(SetWindowSubclass(app.hwnd, MenuProbe::Proc, probeId, DWORD_PTR(&probe)) != FALSE, "Cannot install tab menu probe");
+    struct RemoveProbe { HWND window;~RemoveProbe() { RemoveWindowSubclass(window, MenuProbe::Proc, probeId); } } remove{app.hwnd};
+    RECT row{};Check(TabCtrl_GetItemRect(app.tabsH, 0, &row) != FALSE, "Cannot locate right-click tab");
+    const auto point = MAKELPARAM(row.left + 10, (row.top + row.bottom) / 2);
+    SendMessageW(app.tabsH, WM_RBUTTONDOWN, MK_RBUTTON, point);
+    SendMessageW(app.tabsH, WM_RBUTTONUP, 0, point);
+    Check(probe.count == 1 && probe.correct && app.tabs[app.active].id == originalTab && app.tabs.size() == 12,
+        "Tab right-click menu was missing, duplicated, or changed tabs when cancelled");
+    SendMessageW(app.tabsH, WM_CONTEXTMENU, WPARAM(app.tabsH), MAKELPARAM(-1, -1));
+    Check(probe.count == 2 && probe.correct, "Keyboard context menu did not expose close-all");
+
+    app.AddEmpty();app.Switch(2);LoadedPath(app, paths[2]);
+    app.LoadActive();const auto cancel = app.readCancel;const auto generation = app.loadGeneration;
+    SendMessageW(app.hwnd, WM_COMMAND, CloseAllTabs, 0);
+    Check(app.tabs.empty() && app.active == -1 && TabCtrl_GetItemCount(app.tabsH) == 0
+        && !app.loading && !app.currentDoc && !app.displayedTabId,
+        "Close-all did not clear every tab and the document view");
+    Check(cancel && *cancel && app.loadGeneration > generation && app.documentCache.empty() && app.documentCacheBytes == 0,
+        "Close-all did not cancel pending loading or release the document cache");
+    Check(app.FolderPaths() == folders && TreeItem(app, paths[2]) && !TreeView_GetSelection(app.treeH),
+        "Close-all removed folders or left a stale tree selection");
+    Check(app.closed.size() == 10 && app.closed.back().path == paths[2], "Close-all lost bounded history or the active document");
+    Near(app.closed.back().scroll, 0.42, "Close-all lost the active document's scroll position");
+    PumpFor(30);Check(app.tabs.empty() && !app.currentDoc, "A late read reopened a closed document");
+    app.Command(CloseAllTabs);Check(app.closed.size() == 10, "Closing an empty strip changed reopen history");
+    Check(app.Save() && GetPrivateProfileIntW(L"App", L"Tabs", -1, app.ini.c_str()) == 0,
+        "The empty tab list was not saved");
+    app.Command(Reopen);LoadedPath(app, paths[2]);
+    Check(app.tabs.size() == 1, "Reopen after close-all did not restore one tab");
+    app.Command(CloseAllTabs);
+    TreeView_SelectItem(app.treeH, TreeItem(app, paths[2]));LoadedPath(app, paths[2]);
+    Check(app.tabs.size() == 1, "The sidebar could not reopen the previously selected file");
+    Check(!IsWindowVisible(app.hwnd), "Close-all test unexpectedly showed its host");
+    std::cout << "PASS tab close-all context menu, cancellation, bounded reopen history, async close, folder retention, persistence\n";
+}
+
 void TabsAndState(App& app, const fs::path& root) {
     const auto first = root / L"one.md", second = root / L"two.md", third = root / L"ancestor" / L"deep" / L"three.MD";
     app.OpenPaths({first.wstring(), second.wstring(), third.wstring()});
@@ -3618,6 +3740,8 @@ int main() {
             BoundedWatcherSetup(host.app, root);
             if (!snapshotDirectory.empty()) Snapshots(host.app, sourceRoot, snapshotDirectory);
         }
+        CommandLineFileSidebar(artifacts);
+        TabCloseAllChecks(artifacts);
         MultipleFolderRegistrations(artifacts);
         TreeRescanEfficiencyChecks(artifacts);
         RefreshPrunesMissingMarkdown(artifacts);
