@@ -483,6 +483,39 @@ void CenteringRegression(HWND parent, const std::filesystem::path& output) {
 }
 }
 
+void KeyboardNavigation(HWND parent) {
+    mm::NativeDocumentView view;
+    Require(view.Create(parent, 2) != nullptr, "keyboard test view creation");
+    SetWindowPos(view.Handle(), nullptr, 0, 0, 780, 540, SWP_NOZORDER | SWP_NOACTIVATE);
+    std::string document = "# Keyboard navigation\n\n";
+    for (int i = 0; i < 180; ++i) document += "Paragraph " + std::to_string(i) + " with enough text to scroll.\n\n";
+    auto key = [&](WPARAM code) { SendMessageW(view.Handle(), WM_KEYDOWN, code, 1);SettlePaint(view.Handle()); };
+    auto position = [&] { SCROLLINFO info{sizeof(info), SIF_ALL};Require(GetScrollInfo(view.Handle(), SB_VERT, &info), "keyboard scrollbar state");return info; };
+    for (bool source : {false, true}) {
+        view.SetDocument(document, L"C:\\MMviewer-tests\\keyboard.md", 16, source);
+        // No intervening paint: these keys must override pending restoration.
+        view.SetScrollRatio(0.6);key(VK_HOME);
+        Require(position().nPos == 0, "Home before paint overrides the restored position");
+        view.SetScrollRatio(0.2);key(VK_END);
+        auto end = position();
+        Require(end.nPos == end.nMax - int(end.nPage) + 1 && end.nPos > 0, "End reaches the actual document bottom");
+        key(VK_HOME);auto top = position();
+        key(VK_NEXT);auto page = position();
+        Require(page.nPos == std::max(20, int(top.nPage) - 48), "Page Down advances one viewport with reading overlap");
+        key(VK_PRIOR);Require(position().nPos == 0, "Page Up returns to the prior page");
+        key(VK_PRIOR);Require(position().nPos == 0, "Page Up clamps at the beginning");
+        view.SetFontSize(24);key(VK_END);end = position();
+        Require(end.nPos == end.nMax - int(end.nPage) + 1, "End uses the zoomed layout before paint");
+        key(VK_NEXT);Require(position().nPos == end.nPos, "Page Down clamps at the end");
+        SetWindowPos(view.Handle(), nullptr, 0, 0, 440, 320, SWP_NOZORDER | SWP_NOACTIVATE);
+        key(VK_END);end = position();
+        Require(end.nPos == end.nMax - int(end.nPage) + 1, "End uses the resized viewport before paint");
+    }
+    view.SetDocument("# Short\n", L"C:\\MMviewer-tests\\short-keyboard.md");
+    for (WPARAM code : {VK_END, VK_HOME, VK_NEXT, VK_PRIOR}) { key(code);Require(position().nPos == 0, "Short documents stay at the beginning"); }
+    std::cout << "PASS Home/End/Page Up/Page Down, pending restoration, source mode, zoom/resize, scroll bounds\n";
+}
+
 int wmain(int argc, wchar_t** argv) {
     std::cerr << std::unitbuf;
     std::cout << std::unitbuf;
@@ -498,6 +531,7 @@ int wmain(int argc, wchar_t** argv) {
             CenteringRegression(parent, argv[2]);
             DestroyWindow(parent); Gdiplus::GdiplusShutdown(gdiplus); return 0;
         }
+        KeyboardNavigation(parent);
         {
             mm::NativeDocumentView view;
             Require(view.Create(parent, 1) != nullptr, "native document window creation");

@@ -393,9 +393,7 @@ struct NativeDocumentView::Impl {
             if ((GetKeyState(VK_CONTROL) & 0x8000) && wp == 'A') { self->selectionAnchor = 0; self->selectionFocus = self->plain.size(); InvalidateRect(window, nullptr, FALSE); return 0; }
             if (wp == VK_DOWN) { self->ScrollBy(0, 40); return 0; }
             if (wp == VK_UP) { self->ScrollBy(0, -40); return 0; }
-            if (wp == VK_NEXT || wp == VK_PRIOR) { RECT r{}; GetClientRect(window, &r); self->ScrollBy(0, (wp == VK_NEXT ? 1 : -1) * std::max(20L, r.bottom - 48)); return 0; }
-            if (wp == VK_HOME) { self->ScrollBy(0, -self->vertical); return 0; }
-            if (wp == VK_END) { self->ScrollBy(0, static_cast<int>(self->contentHeight)); return 0; }
+            if (wp == VK_HOME || wp == VK_END || wp == VK_NEXT || wp == VK_PRIOR) { self->Navigate(wp); return 0; }
             break;
         case WM_CONTEXTMENU: {
             HMENU menu = CreatePopupMenu(); AppendMenuW(menu, MF_STRING, 1, self->selectionAnchor == self->selectionFocus ? L"Markdown をコピー" : L"選択範囲をコピー");
@@ -847,6 +845,27 @@ struct NativeDocumentView::Impl {
         SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS};
         info.nMin = 0; info.nMax = std::max(0, static_cast<int>(contentHeight) - 1); info.nPage = std::max(0L, r.bottom); info.nPos = vertical; SetScrollInfo(hwnd, SB_VERT, &info, TRUE);
         info.nMax = std::max(0, static_cast<int>(contentWidth) - 1); info.nPage = std::max(0L, r.right); info.nPos = horizontal; SetScrollInfo(hwnd, SB_HORZ, &info, TRUE);
+    }
+    void Navigate(WPARAM key) {
+        // Key events may arrive before WM_PAINT after a tab switch, zoom or
+        // resize. Resolve the new layout and restored position first so the
+        // next paint cannot undo navigation or use the previous document size.
+        HDC dc = GetDC(hwnd);if (!dc) return;
+        {
+            Graphics g(dc);
+            for (int attempt = 0; attempt < 4; ++attempt) {
+                RECT before{}, after{};GetClientRect(hwnd, &before);
+                EnsureLayout(g);GetClientRect(hwnd, &after);
+                if (before.right == after.right && before.bottom == after.bottom) break;
+            }
+        }
+        ReleaseDC(hwnd, dc);
+        if (key == VK_HOME) ScrollBy(0, -vertical);
+        else if (key == VK_END) ScrollBy(0, std::max(0, static_cast<int>(contentHeight) - vertical));
+        else {
+            RECT client{};GetClientRect(hwnd, &client);
+            ScrollBy(0, (key == VK_NEXT ? 1 : -1) * std::max(20L, client.bottom - 48));
+        }
     }
     void ScrollBy(int x, int y) {
         vertical += y; horizontal += x; UpdateScrollbars();

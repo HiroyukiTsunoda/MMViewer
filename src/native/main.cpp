@@ -1554,6 +1554,13 @@ public:
     case About:MessageBoxW(hwnd,L"MMViewer 0.1.0\nC++ / Win32 · ネイティブ描画\n\nMarkdown parser: md4c 0.5.2 (MIT)\nMermaid: 独自のネイティブ描画（対応構文のみ）\n\n.md を含むフォルダだけを階層表示します。\nブラウザー・.NET・外部通信は不要です。",L"MMViewerについて",MB_OK);break;}}
  bool Key(MSG&msg){if(msg.message!=WM_KEYDOWN)return false;bool ctrl=GetKeyState(VK_CONTROL)<0,shift=GetKeyState(VK_SHIFT)<0;int key=int(msg.wParam),id=0;
     if(key==VK_ESCAPE&&rootDragId){EndRootDrag();return true;}
+    if(!ctrl&&GetKeyState(VK_MENU)>=0&&(key==VK_HOME||key==VK_END||key==VK_PRIOR||key==VK_NEXT)
+      &&(msg.hwnd==hwnd||IsChild(hwnd,msg.hwnd))&&msg.hwnd!=view.Handle()
+      &&msg.hwnd!=searchH&&msg.hwnd!=treeH&&!IsChild(treeH,msg.hwnd)){
+      // Tab and toolbar focus should not make document navigation disappear.
+      // The search edit and folder tree retain their native key behavior.
+      SetFocus(view.Handle());SendMessageW(view.Handle(),WM_KEYDOWN,msg.wParam,msg.lParam);return true;
+    }
     if(ctrl){switch(key){case 'O':id=shift?OpenFolder:UiOpenFile;break;case 'T':id=shift?Reopen:NewTab;break;case 'W':id=CloseTab;break;case 'B':id=Sidebar;break;case 'F':id=Find;break;case 'U':id=Source;break;case VK_OEM_PLUS:case VK_ADD:id=ZoomIn;break;case VK_OEM_MINUS:case VK_SUBTRACT:id=ZoomOut;break;case '0':id=ZoomReset;break;case VK_TAB:if(!tabs.empty())Switch((active+(shift?int(tabs.size())-1:1))%int(tabs.size()));return true;}}
     else if(key==VK_F1)id=About;else if(key==VK_F5)id=Reload;else if(key==VK_F3)id=shift?SearchPrev:SearchNext;else if(key==VK_ESCAPE&&searching)id=SearchClose;
     if(id){Command(id);return true;}return false;}

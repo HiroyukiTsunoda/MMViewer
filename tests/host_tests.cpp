@@ -163,7 +163,7 @@ bool WatchCoversFolder(const App& app, const fs::path& folder) {
     });
 }
 
-bool Key(App& app, int key, bool control = false, bool shift = false) {
+bool Key(App& app, int key, bool control = false, bool shift = false, HWND target = nullptr) {
     struct KeyboardState {
         BYTE previous[256]{};
         KeyboardState(bool control, bool shift) {
@@ -176,7 +176,7 @@ bool Key(App& app, int key, bool control = false, bool shift = false) {
         ~KeyboardState() { SetKeyboardState(previous); }
     } keyboard(control, shift);
     MSG message{};
-    message.hwnd = app.hwnd; message.message = WM_KEYDOWN; message.wParam = key;
+    message.hwnd = target ? target : app.hwnd; message.message = WM_KEYDOWN; message.wParam = key;
     return app.Key(message);
 }
 
@@ -599,6 +599,28 @@ void TabCloseAllChecks(const fs::path& artifacts) {
     Check(app.tabs.size() == 1, "The sidebar could not reopen the previously selected file");
     Check(!IsWindowVisible(app.hwnd), "Close-all test unexpectedly showed its host");
     std::cout << "PASS tab close-all context menu, cancellation, bounded reopen history, async close, folder retention, persistence\n";
+}
+
+void DocumentNavigationKeys(const fs::path& artifacts) {
+    const auto fixture = artifacts / L"document-navigation";
+    const auto path = fixture / L"document.md";Write(path, LongDocument("Navigation"));
+    Host host(fixture / L"session.ini");auto& app = host.app;
+    app.OpenPaths({path.wstring()});LoadedPath(app, path);LayoutDocument(app);
+    Check(Key(app, VK_END, false, false, app.tabsH), "Tab focus swallowed End");
+    Near(app.view.ScrollRatio(), 1, "End from a tab did not move to the document bottom");
+    Check(Key(app, VK_HOME, false, false, app.buttons.front().second), "Toolbar focus swallowed Home");
+    Near(app.view.ScrollRatio(), 0, "Home from the toolbar did not move to the document top");
+    Check(Key(app, VK_NEXT) && app.view.ScrollRatio() > 0, "Page Down from the main window did not scroll");
+    Check(Key(app, VK_PRIOR), "Page Up from the main window was not handled");
+    Near(app.view.ScrollRatio(), 0, "Page Up did not return to the prior page");
+    for (int code : {VK_HOME, VK_END, VK_PRIOR, VK_NEXT}) {
+        Check(!Key(app, code, false, false, app.searchH), "Document navigation intercepted the search edit");
+        Check(!Key(app, code, false, false, app.treeH), "Document navigation intercepted the folder tree");
+        Check(!Key(app, code, false, false, app.view.Handle()), "Document-targeted navigation would be dispatched twice");
+    }
+    Check(Key(app, VK_END) && app.Save(), "Cannot save after keyboard navigation");
+    Near(app.tabs[app.active].scroll, 1, "Keyboard navigation was not captured in the tab state");
+    std::cout << "PASS document navigation from tab/toolbar/main, native search/tree keys, scroll persistence\n";
 }
 
 void TabsAndState(App& app, const fs::path& root) {
@@ -3742,6 +3764,7 @@ int main() {
         }
         CommandLineFileSidebar(artifacts);
         TabCloseAllChecks(artifacts);
+        DocumentNavigationKeys(artifacts);
         MultipleFolderRegistrations(artifacts);
         TreeRescanEfficiencyChecks(artifacts);
         RefreshPrunesMissingMarkdown(artifacts);
