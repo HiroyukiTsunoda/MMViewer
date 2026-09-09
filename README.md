@@ -4,7 +4,9 @@ Windows 11（64ビット）用のMarkdown・Mermaidビューアーです。
 
 ## 起動
 
-`MMViewer.exe` を好きなフォルダに保存し、ダブルクリックして起動します。インストールは不要です。動作に必要なファイルはこのexeのみで、追加DLL、.NET、Node.js、WebView2、ブラウザーは不要です。
+`MMViewer.exe` を好きなフォルダに保存し、ダブルクリックして起動します。アプリの配布ファイルはこのexeだけです。.NETやNode.jsのインストールは不要です。
+
+Mermaidの図を表示するには [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) が必要です。未導入の場合は図の位置に案内を表示します。公式Mermaidエンジン・追加レイアウト・数式フォントはexeに同梱しており、図の描画にインターネット接続は使いません。
 
 起動後に「ファイルを開く」でお手元のMarkdownファイルを、「フォルダを開く」で文書を保存しているフォルダを選びます。ファイルやフォルダをウィンドウへドラッグ＆ドロップして開くこともできます。
 
@@ -77,16 +79,38 @@ UTF-8、BOM付きUTF-8／UTF-16を判定します。不正なUTF-8はCP932で開
 
 ## Mermaidの対応範囲
 
-Mermaidは以下の構文に対応しています。**Mermaid.jsとの全構文互換・同一レイアウトではありません**。未対応の構文は理由とソースを表示します。
+**公式Mermaid 11.17.2の完全版を使用します。** 独自パーサーによる構文制限をなくし、公式エンジンが受け付ける図をWebView2で描画して本文に表示します。`subgraph` 内の `direction`、スタイル、frontmatter／initによる設定も公式エンジンの仕様に従います。
 
 | 図 | 対応 |
 | --- | --- |
-| graph / flowchart | TD・TB・BT・LR・RL、矩形・角丸・スタジアム・菱形・円・二重円・六角形・サブルーチン・DB形状、矢印・点線・太線・双方向・辺ラベル・連鎖、subgraph、classDef / class / style / linkStyleの基本指定 |
-| sequenceDiagram | participant / actor / as、メッセージ・点線・開矢印・×・自己呼出し、autonumber、Note、activate / deactivate / ＋・－、alt / else / opt / loop / par / critical / break、title |
+| 構造・動作 | flowchart / graph、swimlane、sequence、class、state、ER、requirement、C4、architecture、eventmodeling |
+| 計画・整理 | gantt、journey、mindmap、timeline、gitGraph、kanban、treeView、ishikawa、wardley、cynefin |
+| チャート等 | pie、quadrant、sankey、xychart、block、packet、radar、treemap、venn、railroad（IR / EBNF / ABNF / PEG） |
+| 追加機能 | ELKレイアウト、ZenUML、KaTeXによる数式表示 |
 
-class・state・ER・gantt・pie・mindmap、外部設定／init、click、subgraph内direction等は未対応です。未対応・不正な図は理由とソースを表示し、他の本文・図は表示を続けます。
+図の読み込み中も本文を操作できます。不正な構文は公式エンジンのエラーとソースを表示し、他の本文・図は表示を続けます。例えば先頭のキーワードは `flowchart` です。`lowchart` は構文エラーになります。
 
-図は文字サイズに連動して拡大します。大きな図・表・コードは横スクロールで読めます。テーマ変更では図を再解析せず配色を変えます。ソース表示では元のMermaidを検索・コピーできます。
+図は文字サイズに連動して拡大します。大きな図・表・コードは横スクロールで読めます。テーマ変更では図も再描画します。ソース表示では元のMermaidを検索・コピーできます。
+
+表示は静止画像です。図中のリンク・JavaScriptコールバック・アニメーション操作には対応しません。公式の `securityLevel: strict` を使用し、外部画像・外部アイコンパック・外部スクリプトは取得しません。図種ごとの制限やベータ構文は同梱版の公式仕様に従います。
+
+1図のソースは最大1 MB・辺は最大5,000本です。画像は最大1,600万画素・各辺8,192pxに収め、大きい図は画像解像度を下げます。描画時間の上限は30秒です。描画用WebView2プロセスのメモリは、前述の文書キャッシュ上限とは別に使用します。
+
+### subgraph内の方向指定の例
+
+```mermaid
+flowchart LR
+  subgraph frameN["Frame N"]
+    direction LR
+    writeN["値を設定する Updater"] -->|アクセサで書き込む| dataN["T 型の FrameData"]
+    dataN -->|アクセサで読み取る| readN["値を利用する Updater"]
+  end
+  subgraph frameNext["Frame N+1"]
+    direction LR
+    writeNext["値を設定する Updater"] -->|アクセサで書き込む| dataNext["T 型の FrameData"]
+    dataNext -->|アクセサで読み取る| readNext["値を利用する Updater"]
+  end
+```
 
 ## 表示上の制限
 
@@ -100,4 +124,10 @@ class・state・ER・gantt・pie・mindmap、外部設定／init、click、subgr
 
 Markdown解析に [md4c 0.5.2](https://github.com/mity/md4c/tree/release-0.5.2)（MIT、Martin Mitáš）を使用しています。ライセンス本文はexeに含まれています。アプリと使用ライブラリの情報はF1で確認できます。
 
-Mermaid構文の参照は[公式フローチャート仕様](https://mermaid.js.org/syntax/flowchart.html)と[公式シーケンス図仕様](https://mermaid.js.org/syntax/sequenceDiagram.html)です。
+図の表示に [Mermaid](https://mermaid.js.org/)（MIT）、ELK、ZenUML、KaTeX、Microsoft WebView2 SDKを使用しています。依存ライブラリのライセンス・通知はexeと `vendor/mermaid/THIRD_PARTY_NOTICES.txt`、`vendor/webview2/` に同梱しています。
+
+## ビルド
+
+Visual StudioのC++ビルドツールとCMakeを使用し、`powershell -File scripts/build.ps1 -Test` でReleaseビルド・テスト・`dist/MMViewer.exe` への配置を行います。配置前に起動中のMMViewerを閉じてください。Mermaidの実描画テストにもWebView2 Runtimeが必要です。
+
+同梱済みの描画資産は通常のC++ビルドでそのまま使用します。資産を再生成する場合だけ、Node.jsを用意して `scripts/mermaid` で `npm ci --ignore-scripts`、`npm run build` を実行してください。バージョンは `package-lock.json` に固定しています。

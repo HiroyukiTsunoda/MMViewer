@@ -110,6 +110,9 @@ void CacheRegression(HWND parent) {
     Require(view.FontSize() == 23, "cached Beta restores requested font size");
     Require(RenderHash(view.Handle()) == hashB, "cached source-mode Beta exactly restores rendered pixels");
     auto stats = view.GetPerformanceStats();
+    if(stats.parses != warmed.parses || stats.layouts != warmed.layouts)
+        std::cerr << "cache counters: parses " << warmed.parses << " -> " << stats.parses
+                  << ", layouts " << warmed.layouts << " -> " << stats.layouts << ", hits " << stats.cacheHits << "\n";
     Require(stats.parses == warmed.parses && stats.layouts == warmed.layouts, "warm font/source switches avoid parsing and layout");
     Require(stats.cacheHits == warmed.cacheHits + 2, "both warm switches restore cached documents");
     Require(stats.bufferAllocations == warmed.bufferAllocations, "same-size tab paints reuse the backbuffer");

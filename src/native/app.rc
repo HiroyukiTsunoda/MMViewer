@@ -3,6 +3,11 @@
 IDI_MMVIEWER ICON "app.ico"
 1 RT_MANIFEST "app.manifest"
 2 RCDATA "../../vendor/md4c/LICENSE.md"
+IDR_MERMAID_HTML RCDATA "../../vendor/mermaid/index.html"
+IDR_MERMAID_JS RCDATA "../../vendor/mermaid/renderer.js"
+IDR_MERMAID_LICENSE RCDATA "../../vendor/mermaid/THIRD_PARTY_NOTICES.txt"
+IDR_WEBVIEW2_LICENSE RCDATA "../../vendor/webview2/LICENSE.txt"
+IDR_WEBVIEW2_NOTICE RCDATA "../../vendor/webview2/NOTICE.txt"
 1 VERSIONINFO
 FILEVERSION 0,1,0,0
 PRODUCTVERSION 0,1,0,0

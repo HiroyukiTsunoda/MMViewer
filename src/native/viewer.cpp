@@ -3,6 +3,7 @@
 #endif
 #include "viewer.h"
 #include "diagram.h"
+#include "mermaid_renderer.h"
 #include "md4c.h"
 #include <windowsx.h>
 #include <uxtheme.h>
@@ -147,6 +148,7 @@ struct NativeDocumentView::Impl {
         std::wstring imagePath;
         std::string diagramSource;
         std::shared_ptr<Diagram> diagram;
+        std::shared_ptr<MermaidImage> officialDiagram;
         std::unique_ptr<Bitmap> image;
         int heading = 0, quote = 0, indent = 0;
         float x = 0, y = 0, width = 0, height = 0, imageWidth = 0, imageHeight = 0;
@@ -175,6 +177,9 @@ struct NativeDocumentView::Impl {
     int backWidth = 0, backHeight = 0;
     size_t visibleBegin = 0, visibleEnd = 0;
     NativeDocumentView* owner;
+    std::unique_ptr<MermaidRenderer> mermaid;
+    bool refreshMermaidTheme = false;
+    std::shared_ptr<int> mermaidLifetime=std::make_shared<int>(0);
     HWND hwnd = nullptr;
     std::string source;
     std::wstring path, plain, query;
@@ -221,7 +226,26 @@ struct NativeDocumentView::Impl {
     std::wstring imageReference, imageAlternate;
 
     explicit Impl(NativeDocumentView* view) : owner(view) {}
-    ~Impl() { ReleaseBuffer(); }
+    ~Impl() { mermaidLifetime.reset();mermaid.reset();ReleaseBuffer(); }
+    bool RenderedDiagram(const Block& block) const {
+        return block.officialDiagram ? block.officialDiagram->error.empty() : block.diagram && block.diagram->valid;
+    }
+    void RequestDiagram(Block& block) {
+        if(!mermaid||block.kind!=Kind::Diagram)return;
+        if(block.officialDiagram&&block.officialDiagram->dark==dark)return;
+        std::weak_ptr<int> lifetime=mermaidLifetime;
+        block.officialDiagram=mermaid->Render(block.diagramSource,dark,[this,lifetime]{
+            if(lifetime.expired()||!hwnd)return;
+            PostMessageW(hwnd,WM_APP+52,0,0);
+        });
+        dirty=true;
+    }
+    void ReindexText() {
+        plain.clear();plainLower.clear();plainLowered=false;
+        auto add=[&](auto& runs){for(auto& run:runs){run.offset=plain.size();plain+=run.text;}plain+=L'\n';};
+        for(auto& block:blocks){if(block.kind!=Kind::Diagram||!RenderedDiagram(block))add(block.runs);for(auto& row:block.rows)for(auto& cell:row)add(cell.runs);}
+        selectionAnchor=selectionFocus=0;FindMatches();
+    }
     void ReleaseBuffer() {
         if (backDC && backOriginal) SelectObject(backDC, backOriginal);
         if (backBitmap) DeleteObject(backBitmap);
@@ -264,6 +288,7 @@ struct NativeDocumentView::Impl {
             bytes += strings(block.anchor) + strings(block.reference) + strings(block.alternate) +
                 strings(block.language) + strings(block.imagePath) + strings(block.diagramSource);
             if (block.diagram) bytes += DiagramMemoryUsage(*block.diagram);
+            if(block.officialDiagram){bytes+=sizeof(MermaidImage)+strings(block.officialDiagram->error);if(auto image=block.officialDiagram->bitmap)bytes+=size_t(image->GetWidth())*image->GetHeight()*4;}
             if (block.image) bytes += sizeof(Bitmap) + static_cast<size_t>(block.image->GetWidth()) * block.image->GetHeight() * 4;
         }
         return bytes;
@@ -276,6 +301,7 @@ struct NativeDocumentView::Impl {
     }
     void SaveCached() {
         if (!cacheable || path.empty() || !laidOut) return;
+        if(std::any_of(blocks.begin(),blocks.end(),[](const auto& block){return block.officialDiagram&&!block.officialDiagram->complete;}))return;
         auto bytes = RetainedBytes();
         RemoveCached(path);
         // Prefer retaining the parsed text if a large raster would exceed the
@@ -316,6 +342,7 @@ struct NativeDocumentView::Impl {
         if (selecting && hwnd && GetCapture() == hwnd) ReleaseCapture();
         selecting = false;
         if (restored) {
+            refreshMermaidTheme = true;
             source = std::move(restored->source); path = std::move(restored->path); plain = std::move(restored->plain); blocks = std::move(restored->blocks);
             std::wstring().swap(plainLower); plainLowered = false; // The lowercase copy belonged to the departing document.
             layoutWidth = restored->layoutWidth; dpi = restored->dpi; contentWidth = restored->contentWidth; contentHeight = restored->contentHeight;
@@ -339,6 +366,9 @@ struct NativeDocumentView::Impl {
         }
         if (!self) return DefWindowProcW(window, message, wp, lp);
         switch (message) {
+        case WM_APP+52:
+            self->pendingRatio=self->owner->ScrollRatio();self->ReindexText();self->dirty=true;
+            InvalidateRect(window,nullptr,FALSE);return 0;
         case WM_PAINT: self->Paint(); return 0;
         case WM_PRINTCLIENT: self->Paint(reinterpret_cast<HDC>(wp)); return 0;
         case WM_ERASEBKGND: return 1;
@@ -617,8 +647,8 @@ struct NativeDocumentView::Impl {
         auto indexRuns = [this](std::vector<Run>& runs) { for (auto& run : runs) { run.offset = plain.size(); plain += run.text; } plain += L'\n'; };
         for (auto& block : blocks) {
             if (block.kind == Kind::Code && !sourceMode) HighlightCode(block);
-            if (block.kind == Kind::Diagram) block.diagram = ParseDiagram(block.diagramSource);
-            if (block.kind != Kind::Diagram || !block.diagram || !block.diagram->valid) indexRuns(block.runs);
+            if (block.kind == Kind::Diagram) {if(mermaid)RequestDiagram(block);else block.diagram=ParseDiagram(block.diagramSource);}
+            if (block.kind != Kind::Diagram || !RenderedDiagram(block)) indexRuns(block.runs);
             if (block.kind == Kind::Heading) {
                 std::wstring text; for (const auto& run : block.runs) text += run.text;
                 auto name = Anchor(text); int occurrence = anchors[name]++; block.anchor = name + (occurrence ? L"-" + std::to_wstring(occurrence) : L"");
@@ -737,6 +767,11 @@ struct NativeDocumentView::Impl {
         InvalidateRect(hwnd, nullptr, FALSE);
     }
     void EnsureLayout(Graphics& g) {
+        if(mermaid&&refreshMermaidTheme){
+            refreshMermaidTheme=false;
+            for(auto& block:blocks)RequestDiagram(block);
+            ReindexText();
+        }
         RECT client{}; GetClientRect(hwnd, &client);
         int clientWidth = std::max(1L, client.right);
         float currentDpi = GetDpiForWindow(hwnd) / 96.0f;
@@ -795,16 +830,16 @@ struct NativeDocumentView::Impl {
                     std::vector<Run> alt = {{explanation, (lower.starts_with(L"http://") || lower.starts_with(L"https://")) ? block.reference : L"", 0, plain.size()}};
                     block.height = LayoutRuns(g, block, alt, block.x + 12 * dpi, y + 10 * dpi, block.width - 24 * dpi, body * 0.92f, 0, true) + 20 * dpi;
                 }
-            } else if (block.kind == Kind::Diagram && block.diagram && block.diagram->valid) {
+            } else if (block.kind == Kind::Diagram && RenderedDiagram(block)) {
                 float scale = body / 16.0f;
-                block.width = std::max(block.width, block.diagram->width * scale + 24 * dpi);
-                block.height = block.diagram->height * scale + 24 * dpi;
+                block.width = std::max(block.width, (block.officialDiagram?block.officialDiagram->width:block.diagram->width) * scale + 24 * dpi);
+                block.height = (block.officialDiagram?block.officialDiagram->height:block.diagram->height) * scale + 24 * dpi;
             } else {
                 bool code = block.kind == Kind::Code || block.kind == Kind::Diagram;
                 inset = code ? 16 * dpi : 0;
                 if (code) { size *= 0.9f; top += 14 * dpi; }
                 if (block.kind == Kind::Diagram) {
-                    std::wstring message = L"図を表示できません: " + ((block.diagram && !block.diagram->error.empty()) ? block.diagram->error : L"未対応の構文");
+                    std::wstring message = L"図を表示できません: " + (block.officialDiagram?block.officialDiagram->error:((block.diagram && !block.diagram->error.empty()) ? block.diagram->error : L"未対応の構文"));
                     std::vector<Run> error = {{message, {}, Bold, plain.size()}};
                     top += LayoutRuns(g, block, error, block.x + inset, top, block.width - inset * 2, body * 0.92f, 0, true) + 8 * dpi;
                 }
@@ -927,9 +962,15 @@ struct NativeDocumentView::Impl {
                     if (block.kind == Kind::Image && block.imageValid) {
                         if (block.image) g.DrawImage(block.image.get(), bounds);
                     }
-                    if (block.kind == Kind::Diagram && block.diagram && block.diagram->valid) {
-                        DiagramTheme theme{panel, foreground, muted, dark ? Color(255, 44, 57, 75) : Color(255, 232, 240, 254), linkColor};
-                        DrawDiagram(g, *block.diagram, block.x + 12 * dpi, block.y + 12 * dpi, fontSize * dpi / 16.0f, theme);
+                    if (block.kind == Kind::Diagram && RenderedDiagram(block)) {
+                        if(block.officialDiagram){
+                            auto& result=*block.officialDiagram;const float scale=fontSize*dpi/16.0f;
+                            if(result.bitmap)g.DrawImage(result.bitmap.get(),RectF(block.x+12*dpi,block.y+12*dpi,result.width*scale,result.height*scale));
+                            else{const wchar_t* text=L"Mermaidを描画中…";g.DrawString(text,-1,&GetFont(fontSize*dpi,0),PointF(block.x+12*dpi,block.y+12*dpi),&textBrush);}
+                        }else{
+                            DiagramTheme theme{panel, foreground, muted, dark ? Color(255, 44, 57, 75) : Color(255, 232, 240, 254), linkColor};
+                            DrawDiagram(g, *block.diagram, block.x + 12 * dpi, block.y + 12 * dpi, fontSize * dpi / 16.0f, theme);
+                        }
                     }
                     // Table cells restart at the row top; other block pieces are
                     // ordered vertically, including a source view with many lines.
@@ -1080,6 +1121,11 @@ struct NativeDocumentView::Impl {
 
 NativeDocumentView::NativeDocumentView() : impl_(std::make_unique<Impl>(this)) {}
 NativeDocumentView::~NativeDocumentView() { if (impl_->hwnd) DestroyWindow(impl_->hwnd); }
+void NativeDocumentView::EnableOfficialMermaid(const std::wstring& profileDirectory) {
+    if(impl_->mermaid)return;impl_->mermaid=std::make_unique<MermaidRenderer>(profileDirectory);
+    impl_->documentCache.clear();impl_->cacheBytes=0;impl_->Parse();
+    if(impl_->hwnd)InvalidateRect(impl_->hwnd,nullptr,FALSE);
+}
 HWND NativeDocumentView::Create(HWND parent, int id) {
     static bool registered = false;
     if (!registered) {
@@ -1100,9 +1146,16 @@ void NativeDocumentView::InvalidateDocumentCache(const std::wstring& path) {
     if (impl_->path == path) impl_->cacheable = false;
 }
 NativeDocumentView::PerformanceStats NativeDocumentView::GetPerformanceStats() const {
-    return {impl_->parseCount, impl_->layoutCount, impl_->cacheHits, impl_->documentCache.size(), impl_->cacheBytes, impl_->bufferAllocations};
+    PerformanceStats stats{impl_->parseCount, impl_->layoutCount, impl_->cacheHits, impl_->documentCache.size(), impl_->cacheBytes, impl_->bufferAllocations};
+    for(const auto& block:impl_->blocks)if(const auto& diagram=block.officialDiagram){
+        if(!diagram->complete)++stats.pendingDiagrams;
+        else if(diagram->bitmap)++stats.renderedDiagrams;
+        else ++stats.failedDiagrams;
+    }
+    return stats;
 }
 void NativeDocumentView::SetTheme(bool dark) {
+    if(impl_->dark!=dark)impl_->refreshMermaidTheme=true;
     impl_->dark = dark;
     impl_->background = dark ? Gdiplus::Color(255, 24, 28, 35) : Gdiplus::Color(255, 255, 255, 255);
     impl_->foreground = dark ? Gdiplus::Color(255, 223, 230, 239) : Gdiplus::Color(255, 38, 43, 52);

@@ -14,11 +14,13 @@ public:
     NativeDocumentView(const NativeDocumentView&) = delete;
     NativeDocumentView& operator=(const NativeDocumentView&) = delete;
     HWND Create(HWND parent, int id);
+    void EnableOfficialMermaid(const std::wstring& profileDirectory = {});
     void SetDocument(const std::string& source, const std::wstring& path);
     void SetDocument(const std::string& source, const std::wstring& path, int fontPixels, bool sourceMode);
     void InvalidateDocumentCache(const std::wstring& path);
     struct PerformanceStats {
         size_t parses, layouts, cacheHits, cachedDocuments, cachedBytes, bufferAllocations;
+        size_t pendingDiagrams, renderedDiagrams, failedDiagrams;
     };
     PerformanceStats GetPerformanceStats() const;
     void SetTheme(bool dark);

@@ -1551,7 +1551,7 @@ public:
     case ZoomIn:Zoom(1);break;case ZoomOut:Zoom(-1);break;case ZoomReset:Zoom(999);break;
     case Reopen:if(!closed.empty()){Capture();auto t=closed.back();closed.pop_back();int existing=-1;for(size_t i=0;i<tabs.size();i++)if(_wcsicmp(tabs[i].path.c_str(),t.path.c_str())==0){existing=int(i);break;}if(existing>=0){Switch(existing);break;}t.id=nextId++;tabs.push_back(t);active=int(tabs.size())-1;RebuildTabs();LoadActive();SetupWatches();Dirty();}break;
     case CollapseAll:case ExpandAll:ExpandOrCollapseAll(id==ExpandAll);Dirty();break;
-    case About:MessageBoxW(hwnd,L"MMViewer 0.1.0\nC++ / Win32 · ネイティブ描画\n\nMarkdown parser: md4c 0.5.2 (MIT)\nMermaid: 独自のネイティブ描画（対応構文のみ）\n\n.md を含むフォルダだけを階層表示します。\nブラウザー・.NET・外部通信は不要です。",L"MMViewerについて",MB_OK);break;}}
+    case About:MessageBoxW(hwnd,L"MMViewer 0.1.0\nC++ / Win32 · Markdown / Mermaidビューアー\n\nMarkdown parser: md4c 0.5.2 (MIT)\nMermaid: 公式 11.17.2 (MIT) / WebView2\nELK・ZenUML・KaTeX同梱\n\n.md を含むフォルダだけを階層表示します。\n図の表示にはWebView2 Runtimeが必要です。\n描画エンジンと依存ライセンスはexeに同梱しています。",L"MMViewerについて",MB_OK);break;}}
  bool Key(MSG&msg){if(msg.message!=WM_KEYDOWN)return false;bool ctrl=GetKeyState(VK_CONTROL)<0,shift=GetKeyState(VK_SHIFT)<0;int key=int(msg.wParam),id=0;
     if(key==VK_ESCAPE&&rootDragId){EndRootDrag();return true;}
     if(!ctrl&&GetKeyState(VK_MENU)>=0&&(key==VK_HOME||key==VK_END||key==VK_PRIOR||key==VK_NEXT)
@@ -1740,7 +1740,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show){
  INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_TREEVIEW_CLASSES|ICC_TAB_CLASSES|ICC_STANDARD_CLASSES};InitCommonControlsEx(&controls);
  int exitCode=0;{App app;app.fastExit=true;try{app.Restore();}catch(...){ }WNDCLASSEXW wc{sizeof(wc)};wc.lpfnWndProc=App::Proc;wc.hInstance=instance;wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(IDI_MMVIEWER));if(!wc.hIcon)wc.hIcon=LoadIconW(nullptr,IDI_APPLICATION);wc.lpszClassName=WindowClass;RegisterClassExW(&wc);
  auto h=CreateWindowExW(WS_EX_ACCEPTFILES,WindowClass,L"MMViewer",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,MulDiv(app.winW,GetDpiForSystem(),96),MulDiv(app.winH,GetDpiForSystem(),96),nullptr,nullptr,instance,&app);
- if(h){ShowWindow(h,show);UpdateWindow(h);app.LoadActive(false);app.SetupWatches(true);if(!paths.empty())app.OpenPaths(paths,true);app.StartStartupCheck();
+ if(h){app.view.EnableOfficialMermaid();ShowWindow(h,show);UpdateWindow(h);app.LoadActive(false);app.SetupWatches(true);if(!paths.empty())app.OpenPaths(paths,true);app.StartStartupCheck();
    if(!SetPropW(h,mm::InstanceReadyProperty,HANDLE(1))){MessageBoxW(h,L"MMViewerの起動状態を登録できませんでした。",L"MMViewer",MB_OK|MB_ICONERROR);DestroyWindow(h);exitCode=1;}
    else{MSG msg{};BOOL received;while((received=GetMessageW(&msg,nullptr,0,0))>0){if(app.TabWheel(msg)||app.Key(msg))continue;TranslateMessage(&msg);DispatchMessageW(&msg);}exitCode=received<0?1:int(msg.wParam);}
  }else exitCode=1;}

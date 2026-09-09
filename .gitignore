@@ -6,3 +6,4 @@
 *.obj
 *.ilk
 /artifacts/
+/scripts/mermaid/node_modules/
