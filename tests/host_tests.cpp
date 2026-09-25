@@ -535,6 +535,57 @@ void CommandLineFileSidebar(const fs::path& artifacts) {
     std::cout << "PASS command-line parent registration, async selection, ancestor reuse, repeat reveal, persistence\n";
 }
 
+void ExcludedCommandLineSidebar(const fs::path& artifacts) {
+    const auto fixture = artifacts / L"excluded-command-line-sidebar";
+    const auto root = fixture / L"registered";
+    const auto excluded = root / L"removed";
+    const auto first = excluded / L"one" / L"first.md";
+    const auto second = excluded / L"two" / L"second.md";
+    const auto retained = root / L"retained.md";
+    Write(first, "# First\n");Write(second, "# Second\n");Write(retained, "# Retained\n");
+    Host host(fixture / L"session.ini");
+    auto& app = host.app;
+    app.OpenRoot(root.wstring());
+    Until([&] { return TreeItem(app, first) && TreeItem(app, second) && !app.TreeTasksPending(); },
+        "Excluded command-line fixture did not scan");
+    app.RemoveFolderFromList(mm::NormalizePath(excluded.wstring()));
+    app.FlushTreeTasks();
+    const auto roots = app.FolderPaths();
+    const auto exclusions = app.excludedFolders;
+    for (const auto& path : {first, second, first}) {
+        app.OpenPaths({path.wstring()}, true);
+        LoadedPath(app, path);
+        Check(app.FolderPaths() == roots && app.excludedFolders == exclusions,
+            "Opening an excluded document registered its parent or cleared the exclusion");
+        Check(!app.tabs[app.active].autoRefresh, "Opening an excluded document resumed automatic refresh");
+    }
+    app.RefreshTree();
+    Until([&] { return !Folder(app, root).scanning && !app.TreeTasksPending() && !app.watchSetupPending; },
+        "Excluded document refresh did not settle");
+    Check(!TreeItem(app, excluded) && !TreeItem(app, first) && !TreeItem(app, second)
+        && TreeItem(app, retained) && app.FolderPaths() == roots,
+        "Refresh restored excluded folders or added roots");
+    Check(app.Save(), "Cannot save excluded command-line session");
+    App restored;restored.ini = app.ini;restored.RestoreFolders();restored.RestoreExcludedFolders();
+    Check(restored.FolderPaths() == roots && restored.excludedFolders == exclusions,
+        "Excluded command-line session did not retain roots and exclusions");
+
+    // The exclusion also survives when its registered ancestor is removed.
+    app.RemoveFolderFromList(mm::NormalizePath(root.wstring()));
+    app.FlushTreeTasks();
+    app.OpenPaths({second.wstring()}, true);
+    LoadedPath(app, second);
+    Check(!app.HasFolders() && TreeView_GetCount(app.treeH) == 0 && !app.tabs[app.active].autoRefresh,
+        "Opening a document restored a removed root as a new nested root");
+    // Only explicitly opening the folder resumes its listing and monitoring.
+    app.OpenRoot(root.wstring());
+    Until([&] { return TreeItem(app, first) && TreeItem(app, second) && !app.TreeTasksPending(); },
+        "Explicit folder open did not restore excluded documents");
+    Check(app.excludedFolders.empty() && app.folders.size() == 1 && app.tabs[app.active].autoRefresh,
+        "Explicit folder open failed to resume the removed folder");
+    std::cout << "PASS excluded external documents keep roots, exclusions and paused refresh; explicit folder open restores them\n";
+}
+
 void TabCloseAllChecks(const fs::path& artifacts) {
     const auto fixture = artifacts / L"tab-close-all";
     const auto root = fixture / L"documents";
@@ -973,9 +1024,16 @@ void FolderListRemoval(App& app, const fs::path& root) {
     Check(clickedFolder == mm::NormalizePath(ancestor.wstring()), "Context menu used selection instead of clicked folder");
     Check(TreeView_GetSelection(app.treeH) == TreeItem(app, root), "Hit testing changed the selected item");
     Check(app.FolderAt(itemPoint(descendant)).empty(), "Markdown file received folder removal action");
+    Check(App::ExplorerFolder(app.NodeOf(app.TreeItemAt(itemPoint(descendant))))
+        == mm::NormalizePath(descendant.parent_path().wstring()),
+        "Markdown context menu did not target the clicked file's containing folder");
+    Check(App::ExplorerFolder(app.NodeOf(app.TreeItemAt(itemPoint(ancestor)))) == clickedFolder,
+        "Folder context menu did not target the clicked folder itself");
     POINT empty{-5, -5};
     ClientToScreen(app.treeH, &empty);
     Check(app.FolderAt(empty).empty(), "Empty tree area received folder removal action");
+    Check(App::ExplorerFolder(app.NodeOf(app.TreeItemAt(empty))).empty(),
+        "Empty tree area received an Explorer target");
     HMENU menu = app.TreeMenu(true);
     wchar_t label[64]{};
     const int length = GetMenuStringW(menu, RemoveFromList, label, 64, MF_BYCOMMAND);
@@ -985,6 +1043,21 @@ void FolderListRemoval(App& app, const fs::path& root) {
     const UINT nonFolderAction = GetMenuState(menu, RemoveFromList, MF_BYCOMMAND);
     DestroyMenu(menu);
     Check(nonFolderAction == UINT(-1), "Non-folder menu exposes folder removal action");
+    menu = app.TreeMenu(false, true);
+    const int fileOpenLength = GetMenuStringW(menu, OpenInExplorer, label, 64, MF_BYCOMMAND);
+    const UINT fileRemoveAction = GetMenuState(menu, RemoveFromList, MF_BYCOMMAND);
+    DestroyMenu(menu);
+    Check(fileOpenLength > 0 && std::wstring(label) == L"フォルダを開く",
+        "Markdown context menu is missing the open-folder action");
+    Check(fileRemoveAction == UINT(-1), "Markdown context menu exposes folder removal action");
+    menu = app.TreeMenu(true);
+    Check(GetMenuState(menu, OpenInExplorer, MF_BYCOMMAND) != UINT(-1),
+        "Folder context menu lost the open-folder action");
+    DestroyMenu(menu);
+    menu = app.TreeMenu(false);
+    Check(GetMenuState(menu, OpenInExplorer, MF_BYCOMMAND) == UINT(-1),
+        "Empty tree context menu exposes an open-folder action");
+    DestroyMenu(menu);
 
     // Model pending scan/read work and a dirty debounce timer while the popup
     // is open. Keep completed messages queued until after list removal.
@@ -3763,6 +3836,7 @@ int main() {
             if (!snapshotDirectory.empty()) Snapshots(host.app, sourceRoot, snapshotDirectory);
         }
         CommandLineFileSidebar(artifacts);
+        ExcludedCommandLineSidebar(artifacts);
         TabCloseAllChecks(artifacts);
         DocumentNavigationKeys(artifacts);
         MultipleFolderRegistrations(artifacts);

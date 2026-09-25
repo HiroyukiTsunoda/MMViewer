@@ -39,7 +39,7 @@ constexpr wchar_t WindowClass[] = L"MMViewer.Native.Main.v1";
 constexpr UINT LoadDone = WM_APP + 1, TreeDone = WM_APP + 2, WatchDone = WM_APP + 3, StartupDone = WM_APP + 4;
 constexpr UINT_PTR RootDragTimer = 0x4d4d;
 enum { UiOpenFile=101, OpenFolder, NewTab, CloseTab, Sidebar, Theme, Source, Wide, Find, Reload,
-       ZoomIn, ZoomOut, ZoomReset, Reopen, SearchNext, SearchPrev, SearchClose, CollapseAll, ExpandAll, About, RemoveFromList, CloseAllTabs };
+       ZoomIn, ZoomOut, ZoomReset, Reopen, SearchNext, SearchPrev, SearchClose, CollapseAll, ExpandAll, About, RemoveFromList, CloseAllTabs, OpenInExplorer };
 struct FolderPathLess {
  bool operator()(const std::wstring& left,const std::wstring& right) const {return _wcsicmp(left.c_str(),right.c_str())<0;}
 };
@@ -822,6 +822,9 @@ public:
  void Link(const std::wstring&target){auto s=mm::Utf8(target);if(s.rfind("https://",0)==0||s.rfind("http://",0)==0){ShellExecuteW(hwnd,L"open",target.c_str(),nullptr,nullptr,SW_SHOWNORMAL);return;}if(active<0)return;
     if(!s.empty()&&s[0]=='#'){view.ScrollToAnchor(mm::Wide(mm::Fragment(s)));return;}auto path=mm::ResolveReference(tabs[active].path,s);if(!path.empty()&&mm::IsMarkdown(path)){pendingAnchor=mm::Wide(mm::Fragment(s));pendingAnchorPath=path;OpenPaths({path});}else{notice=L"このリンク形式は開けません";InvalidateRect(hwnd,nullptr,FALSE);}}
  void EnsureFileFolder(const std::wstring& path){
+    // Opening a document must not undo an explicit "remove from list".
+    // Only opening the folder itself resumes its listing and monitoring.
+    if(IsExcluded(path))return;
     const auto parent=fs::path(path).parent_path().wstring();
     if(parent.empty())return;
     // Reuse a registered ancestor, including while its asynchronous scan is
@@ -829,7 +832,7 @@ public:
     FolderRegistration* owner=nullptr;
     for(const auto& folder:folders)if(IsWithinFolder(parent,folder->path)
       &&(!owner||folder->path.size()>owner->path.size()))owner=folder.get();
-    if(!owner||IsExcluded(path)){OpenRoot(parent);return;}
+    if(!owner){OpenRoot(parent);return;}
     // The file may have been created since the last scan, before its watch
     // notification arrives. Scan completion selects the current active tab.
     if(!rowsByPath.contains(path)&&!owner->scanning&&!owner->queuedTasks)
@@ -1314,16 +1317,20 @@ public:
     SetupWatches();for(auto id:resume)if(auto*folder=FindFolder(id))RefreshFolder(*folder);
     notice=L"「"+fs::path(path).filename().wstring()+L"」をリストから削除し、探索・自動更新を停止しました";InvalidateRect(hwnd,nullptr,FALSE);Dirty();
  }
- std::wstring FolderAt(POINT screen){
-    if(!sidebar)return {};
+ HTREEITEM TreeItemAt(POINT screen){
+    if(!sidebar)return nullptr;
     ScreenToClient(treeH,&screen);TVHITTESTINFO hit{};hit.pt=screen;
-    auto item=TreeView_HitTest(treeH,&hit);if(!item||!(hit.flags&TVHT_ONITEM))return {};
-    TVITEMW info{};info.mask=TVIF_PARAM;info.hItem=item;if(!TreeView_GetItem(treeH,&info))return {};
-    auto*node=reinterpret_cast<mm::FolderNode*>(info.lParam);return node&&node->directory?node->path:L"";
+    auto item=TreeView_HitTest(treeH,&hit);return item&&(hit.flags&TVHT_ONITEM)?item:nullptr;
  }
- HMENU TreeMenu(bool folder){
+ std::wstring FolderAt(POINT screen){auto*node=NodeOf(TreeItemAt(screen));return node&&node->directory?node->path:L"";}
+ static std::wstring ExplorerFolder(const mm::FolderNode* node){
+    return !node?L"":node->directory?node->path:fs::path(node->path).parent_path().wstring();
+ }
+ HMENU TreeMenu(bool folder,bool file=false){
     HMENU menu=CreatePopupMenu();
-    if(folder){AppendMenuW(menu,MF_STRING,RemoveFromList,L"リストから削除");AppendMenuW(menu,MF_SEPARATOR,0,nullptr);}
+    if(folder||file)AppendMenuW(menu,MF_STRING,OpenInExplorer,L"フォルダを開く");
+    if(folder)AppendMenuW(menu,MF_STRING,RemoveFromList,L"リストから削除");
+    if(folder||file)AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
     AppendMenuW(menu,MF_STRING,ExpandAll,L"すべて展開");AppendMenuW(menu,MF_STRING,CollapseAll,L"すべて折りたたむ");AppendMenuW(menu,MF_STRING,Reload,L"フォルダを更新");return menu;
  }
  void RunTreeMenuCommand(int command,const std::wstring& path,unsigned long long folderId){
@@ -1332,15 +1339,23 @@ public:
     // cannot act on it. Adding an unrelated root leaves this popup valid.
     auto*folder=FindFolder(folderId);
     if(folderId&&(!folder||(!path.empty()&&!IsWithinFolder(path,folder->path))))return;
-    if(command==RemoveFromList){if(folder)RemoveFolderFromList(path);}else if(command)Command(command);
+    if(command==OpenInExplorer){
+      if(path.empty())return;
+      if(reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd,L"explore",path.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32){
+        notice=L"Explorerでフォルダを開けませんでした: "+path;InvalidateRect(hwnd,nullptr,FALSE);
+      }
+    }else if(command==RemoveFromList){if(folder)RemoveFolderFromList(path);}else if(command)Command(command);
  }
- void ShowTreeMenu(POINT point,const std::wstring& path,unsigned long long folderId=0){
+ void ShowTreeMenu(POINT point,const std::wstring& path,unsigned long long folderId=0,bool file=false){
     if(!folderId){TVHITTESTINFO hit{};hit.pt=point;ScreenToClient(treeH,&hit.pt);if(auto*folder=FolderForItem(TreeView_HitTest(treeH,&hit)))folderId=folder->id;}
-    HMENU menu=TreeMenu(!path.empty());
+    HMENU menu=TreeMenu(!path.empty()&&!file,!path.empty()&&file);
     int command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,hwnd,nullptr);DestroyMenu(menu);
     RunTreeMenuCommand(command,path,folderId);
  }
- void ShowTreeMenu(POINT point){ShowTreeMenu(point,FolderAt(point));}
+ void ShowTreeMenu(POINT point){
+    auto item=TreeItemAt(point);auto*node=NodeOf(item);auto*folder=FolderForItem(item);
+    ShowTreeMenu(point,ExplorerFolder(node),folder?folder->id:0,node&&!node->directory);
+ }
  void WalkItems(HTREEITEM item,const std::function<void(HTREEITEM,mm::FolderNode*)>&fn){for(;item;item=TreeView_GetNextSibling(treeH,item)){TVITEMW info{};info.hItem=item;info.mask=TVIF_PARAM;TreeView_GetItem(treeH,&info);fn(item,reinterpret_cast<mm::FolderNode*>(info.lParam));WalkItems(TreeView_GetChild(treeH,item),fn);}}
  void SelectTreeFile(bool ensureVisible=false){
     if(active<0)return;auto matches=[&](const mm::FolderNode* node){return node&&!node->directory&&_wcsicmp(node->path.c_str(),tabs[active].path.c_str())==0;};
@@ -1612,10 +1627,10 @@ public:
         if(!item||!TreeView_GetItemRect(h,item,&row,TRUE))return 0;
         TVITEMW info{};info.mask=TVIF_PARAM;info.hItem=item;if(!TreeView_GetItem(h,&info))return 0;
         auto*node=reinterpret_cast<mm::FolderNode*>(info.lParam);
-        const std::wstring path=node&&node->directory?node->path:L"";
+        const std::wstring path=ExplorerFolder(node);
         RECT client{};GetClientRect(h,&client);
         point={std::clamp(row.left+2,0L,std::max(0L,client.right-1)),std::clamp((row.top+row.bottom)/2,0L,std::max(0L,client.bottom-1))};ClientToScreen(h,&point);
-        auto*folder=a->FolderForItem(item);a->ShowTreeMenu(point,path,folder?folder->id:0);return 0;
+        auto*folder=a->FolderForItem(item);a->ShowTreeMenu(point,path,folder?folder->id:0,node&&!node->directory);return 0;
       }
       a->ShowTreeMenu(point);return 0;
     }
