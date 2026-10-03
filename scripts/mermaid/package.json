@@ -1,0 +1,12 @@
+{
+  "name": "mmviewer-mermaid-assets",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": { "build": "node build.mjs" },
+  "dependencies": {
+    "mermaid": "11.17.2",
+    "@mermaid-js/layout-elk": "0.2.3",
+    "@mermaid-js/mermaid-zenuml": "0.2.3"
+  },
+  "devDependencies": { "esbuild": "0.25.12" }
+}

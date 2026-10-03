@@ -1,0 +1,9 @@
+/build/
+/build-native/
+/dist/
+*.user
+*.pdb
+*.obj
+*.ilk
+/artifacts/
+/scripts/mermaid/node_modules/

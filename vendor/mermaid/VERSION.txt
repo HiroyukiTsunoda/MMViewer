@@ -1,0 +1,5 @@
+Mermaid 11.17.2 (full package)
+@mermaid-js/layout-elk 0.2.3
+@mermaid-js/mermaid-zenuml 0.2.3
+Generated using scripts/mermaid/build.mjs and scripts/mermaid/package-lock.json.
+All JavaScript and KaTeX fonts are embedded; no CDN is required at runtime.
